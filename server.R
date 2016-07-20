@@ -14,17 +14,25 @@ library(tidyr)
 
 # GLOBAL DATA
 # read_csv bug sur le origin.1.1
-us17 = read.csv("data/Fabric adjusted residual_J5_US17 et 18_juin 2015 - Macro_protov2.csv", stringsAsFactors = FALSE)
+# us17 = read.csv("data/Fabric adjusted residual_J5_US17 et 18_juin 2015 - Macro_protov2.csv", stringsAsFactors = FALSE)
 
 # Define server logic required to summarize and view the selected
 # dataset
 shinyServer(function(input, output, session) {
   
+  baseData <- reactiveValues()
+
+  observe({
+    req(input$fileInput)
+    baseData$csv <- read.csv(file=input$fileInput$datapath, header=input$header, sep=input$sep, quote=input$quote, dec=input$dec, stringsAsFactor=FALSE)
+    })
+  
   #updateselectedinput
   observe({
+    req(input$fileInput)
     updateSelectInput(session = session,
                       inputId = "columns",
-                      choices = names(us17))
+                      choices = names(baseData$csv))
   })
   
   
@@ -32,41 +40,68 @@ shinyServer(function(input, output, session) {
     req(input$columns)
     updateSelectInput(session = session,
                       inputId = "criteria",
-                      choices = unique(us17 %>% select_(input$columns)))
+                      choices = unique(baseData$csv %>% select_(input$columns)))
   })
-
+  
+  observe({
+    req(input$fileInput)
+    updateSelectInput(session = session,
+                      inputId = "valeurs",
+                      choices = names(baseData$csv))
+  })
   
   
   dataInput <- reactive({
     req(input$columns)
     req(input$criteria)
+    req(input$valeurs)
     
-    expr <- lazyeval::interp(quote(x == y & z != "NA"), x = as.name(input$columns), y = input$criteria, z = as.name("Orientation.1"))
-    print(file=stderr(), expr)
-    filteredUS <- us17 %>% filter_(expr) 
+    expr <- lazyeval::interp(quote(x == y & z != "NA"), x = as.name(input$columns), y = input$criteria, z = as.name(input$valeurs) )
+    #print(file=stderr(), expr)
+    filteredUS <- baseData$csv %>% filter_(expr) 
     filteredUS
   })
   
   output$data <- renderDataTable(dataInput())
+    
   
-  output$result <- formattable::renderFormattable({
+  finalTable <- reactive({
+    
     req(input$columns)
     req(input$criteria)
+    req(input$valeurs)
     
     data <- dataInput()
     
+    symetryFilter <- function(X) {
+      if (X > input$orientation) {
+        return(X - input$orientation)} else return(X )
+    }
+    
     breaksVal <- seq(0, input$orientation, by = as.numeric(input$classes))
-    data$levels <- cut(data$Orientation.1, breaks = breaksVal, right = FALSE )
+    data$modulorient <- as.numeric(Map(symetryFilter,data[, input$valeurs]))
+    
+    data$levels <- cut(data$modulorient, breaks = breaksVal, right = FALSE )
+    data$levels[is.na(data$levels)] <- paste0("[0,",input$classes,")")
+    
     statByFactor <- data %>% group_by(levels) %>%  summarize(nb = n()) %>% complete(levels, fill = list("nb" = 0))
     
-    print(file=stderr(), statByFactor)
-
+    output$detailsclassification <- renderTable(data %>% select_("modulorient", "levels", input$valeurs))
+    output$detailsnb <- renderTable(statByFactor %>% select(levels,nb))
     
-     # mean objects by class group (observed objects / number of classes )
+    #print(file=stderr(), statByFactor)
+    
+    # mean objects by class group (observed objects / number of classes )
     statByFactorFiltered <- statByFactor %>% filter(!is.na(levels))
-
+    
     sumOfObject <- sum(statByFactorFiltered$nb)
     meanObjectByClass <- sumOfObject / (input$orientation/as.numeric(input$classes)) 
+    
+    output$detailsmean <- renderUI( {
+      str1 <- paste("sum of object = ", sumOfObject) 
+      str2 <- paste("orientation/classes = ", input$orientation/as.numeric(input$classes)) 
+      str3 <- paste("object by class = ", meanObjectByClass)
+      HTML(paste(str1,str2,str3, sep = "<br/>"))})
     
     statByClass <- statByFactorFiltered %>% 
       mutate(diff_obs_exp = statByFactorFiltered$nb - meanObjectByClass) %>%
@@ -76,32 +111,51 @@ shinyServer(function(input, output, session) {
       mutate(sqrt_vij = sqrt(vij)) %>%
       mutate(dij = eij / sqrt_vij) %>%
       mutate(P_calcule = pnorm(dij, 0, 1, TRUE)) %>%
-      mutate(P_reduced = ifelse(P_calcule < 0, P_calcule, round(1 - P_calcule,3)))
+      mutate(P_reduced = ifelse(P_calcule < 0, P_calcule, 1 - P_calcule)) %>%
+      mutate(P_final = round(ifelse(dij >= 0, P_reduced, P_calcule),4))
     
-   chooseColor <- function(x) {
-     finalColor <- "black"
-     
-     print(file=stderr(), x)
-     
-     if (x <= 0.001) {
-       finalColor <- "green"}
-     else if(x <= 0.01) {
-       finalColor <- "darkblue"}
-     else if (x<= 0.05) {
-       finalColor <- "softblue"}
-     else{
-        if (x > 0.1) {
-          finalColor <- "red"}
-       else {
-         finalColor <-  "orange"}
-     }
-       return(finalColor) 
-   }
-   
-    formattable(statByClass, list(
-      P_reduced = formatter("span", style = ~ style(color = chooseColor(P_reduced), font.weight = "bold") ))
-    )
-  })  
+     return (statByClass)
+  })
+  
+  output$result <- formattable::renderFormattable({
+    
+    chooseColor <- function(x) {
+      finalColor <- c()
+      colorSelected <- "black"
+      
+      for (val in x)
+      { 
+        if (val <= 0.001) {
+          colorSelected <- "green"}
+        else if(val <= 0.01) {
+          colorSelected <- "darkblue"}
+        else if (val<= 0.05) {
+          colorSelected <- "softblue"}
+        else{
+          if (val > 0.1) {
+            colorSelected <- "red"}
+          else {
+            colorSelected <-  "orange"}
+        }
+        
+        finalColor <- append(finalColor, colorSelected) 
+        
+      }
+      return(finalColor) 
+    }
+    
+    formattable(finalTable() , list(
+       P_final = formatter("span", style = x ~ style(color = chooseColor(x), font.weight = "bold") ))
+      )
+    
+  })
+  
+  output$downloadTable <- downloadHandler(
+    filename = function() {paste('myoutput-', Sys.Date(), '.csv', sep='')},
+    content = function(file) {
+      write.csv(finalTable(),file)
+    }
+  )
 
 
 
